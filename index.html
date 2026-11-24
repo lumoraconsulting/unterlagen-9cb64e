@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Geschützte Unterlagen</title>
+<style id="huelle-stil">
+  /* Bleibt nach dem Öffnen: Ladezustand der Downloads und Großansicht */
+  a[data-download][aria-busy="true"] { cursor: progress; opacity: .7; }
+  html.lb-offen, html.lb-offen body { overflow: hidden; }
+  .lb-hinter { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column; background: rgba(20, 24, 29, .94); color: #fff; font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .lb-kopf { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px 10px 20px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .lb-titel { margin: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb-zu { flex: none; width: 44px; height: 44px; padding: 0; border: 1px solid rgba(255, 255, 255, .35); border-radius: 12px; background: transparent; color: #fff; font-family: inherit; font-size: 28px; line-height: 1; cursor: pointer; }
+  .lb-zu:hover, .lb-zu:focus-visible { background: rgba(255, 255, 255, .12); outline: none; }
+  .lb-liste { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 4px 16px 40px; padding-bottom: max(40px, env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .lb-bild { display: block; flex: none; max-width: min(100%, 1200px); height: auto; border-radius: 4px; background: #2b3138; }
+</style>
+<style id="tor-stil">
+  /* Nur für die Passwortabfrage, wird beim Öffnen entfernt */
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; box-sizing: border-box; background: #f4f6f8; color: #1f2328; font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .tor { width: 100%; max-width: 400px; box-sizing: border-box; padding: 32px 28px 28px; border: 1px solid #dde2e7; border-radius: 12px; background: #fff; }
+  .tor h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.25; }
+  .tor p { margin: 0 0 22px; color: #5f6b76; }
+  .tor label { display: block; margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  .tor input { display: block; width: 100%; box-sizing: border-box; margin: 0; padding: 11px 14px; border: 1px solid #dde2e7; border-radius: 12px; background: #fff; color: #1f2328; font: inherit; font-size: 16px; }
+  .tor input:focus { border-color: #34506b; outline: 2px solid rgba(52, 80, 107, .25); outline-offset: 0; }
+  .tor button { display: block; width: 100%; margin: 14px 0 0; padding: 12px 16px; border: 0; border-radius: 12px; background: #34506b; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .tor button:disabled { opacity: .75; cursor: progress; }
+  .tor .tor-meldung { min-height: 1.55em; margin: 12px 0 0; color: #a33a2b; font-size: 15px; }
+  .tor .tor-meldung:empty { margin: 0; min-height: 0; }
+</style>
+</head>
+<body>
+<main class="tor">
+  <h1>Geschützte Unterlagen</h1>
+  <p>Bitte geben Sie das Passwort ein.</p>
+  <form id="tor-form" novalidate>
+    <label for="tor-passwort">Passwort</label>
+    <input id="tor-passwort" name="password" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus required>
+    <button type="submit" id="tor-knopf">Öffnen</button>
+    <p class="tor-meldung" id="tor-meldung" role="alert" aria-live="assertive"></p>
+  </form>
+  <noscript><p>Zum Öffnen muss JavaScript eingeschaltet sein.</p></noscript>
+</main>
+<script type="application/json" id="konfig">{"salt":"HcFl64LgREwvnX+k2FTOgQ==","iter":600000,"seite":"03da9190b72970f3"}</script>
+<script>
+(() => {
+  'use strict';
+
+  const konfig = JSON.parse(document.getElementById('konfig').textContent);
+  const form = document.getElementById('tor-form');
+  const feld = document.getElementById('tor-passwort');
+  const knopf = document.getElementById('tor-knopf');
+  const meldung = document.getElementById('tor-meldung');
+
+  class Netzfehler extends Error {}
+  class FalschesPasswort extends Error {}
+
+  let schluessel = null;     // nur im Speicher, nie gespeichert
+  let seiteDaten = null;     // Promise<ArrayBuffer> der verschlüsselten Seite
+  const bildUrls = new Map(); // id -> Promise<blob-URL>
+
+  function base64Bytes(text) {
+    const bin = atob(text);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  async function holen(id) {
+    let antwort;
+    try {
+      antwort = await fetch('d/' + encodeURIComponent(id) + '.bin', { credentials: 'same-origin' });
+    } catch (e) {
+      throw new Netzfehler();
+    }
+    if (!antwort.ok) throw new Netzfehler();
+    try {
+      return await antwort.arrayBuffer();
+    } catch (e) {
+      throw new Netzfehler();
+    }
+  }
+
+  async function entschluesseln(puffer, key) {
+    if (puffer.byteLength < 28) throw new FalschesPasswort();
+    try {
+      return await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: new Uint8Array(puffer, 0, 12) }, key, new Uint8Array(puffer, 12));
+    } catch (e) {
+      throw new FalschesPasswort();
+    }
+  }
+
+  async function ableiten(passwort) {
+    const basis = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(passwort.normalize('NFC')), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: base64Bytes(konfig.salt), iterations: konfig.iter, hash: 'SHA-256' },
+      basis, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  }
+
+  function beschaeftigt(an) {
+    knopf.disabled = an;
+    feld.readOnly = an;
+    knopf.textContent = an ? 'Wird geöffnet …' : 'Öffnen';
+    form.setAttribute('aria-busy', an ? 'true' : 'false');
+  }
+
+  form.addEventListener('submit', async (ereignis) => {
+    ereignis.preventDefault();
+    if (knopf.disabled) return;
+    const passwort = feld.value;
+    if (!passwort) { feld.focus(); return; }
+    if (!window.crypto || !crypto.subtle) {
+      meldung.textContent = 'Dieser Browser kann die Seite nicht öffnen. Bitte einen aktuellen Browser verwenden.';
+      return;
+    }
+    meldung.textContent = '';
+    beschaeftigt(true);
+    try {
+      if (!seiteDaten) seiteDaten = holen(konfig.seite);
+      const [key, puffer] = await Promise.all([ableiten(passwort), seiteDaten.catch((e) => { seiteDaten = null; throw e; })]);
+      const klar = await entschluesseln(puffer, key);
+      const daten = JSON.parse(new TextDecoder().decode(klar));
+      schluessel = key;
+      oeffnen(daten);
+    } catch (fehler) {
+      beschaeftigt(false);
+      meldung.textContent = fehler instanceof FalschesPasswort
+        ? 'Das Passwort stimmt nicht.'
+        : 'Die Seite konnte nicht geladen werden.';
+      feld.focus();
+      feld.select();
+    }
+  });
+
+  // ---------- Nach dem Öffnen ----------
+
+  function oeffnen(daten) {
+    const torStil = document.getElementById('tor-stil');
+    if (torStil) torStil.remove();
+    document.title = daten.title;
+    document.body.innerHTML = daten.html;
+    window.scrollTo(0, 0);
+    vorschauenBeobachten();
+    document.addEventListener('click', klick);
+    if (location.hash.length > 1) {
+      let ziel = null;
+      try { ziel = document.getElementById(decodeURIComponent(location.hash.slice(1))); } catch (e) { /* ungültig */ }
+      if (ziel) ziel.scrollIntoView();
+    }
+  }
+
+  function bildUrl(id, mime) {
+    if (!bildUrls.has(id)) {
+      const versprechen = holen(id)
+        .then((puffer) => entschluesseln(puffer, schluessel))
+        .then((klar) => URL.createObjectURL(new Blob([klar], { type: mime || 'image/jpeg' })));
+      versprechen.catch(() => bildUrls.delete(id));
+      bildUrls.set(id, versprechen);
+    }
+    return bildUrls.get(id);
+  }
+
+  function bildLaden(img) {
+    if (img.dataset.geladen) return;
+    img.dataset.geladen = '1';
+    bildUrl(img.dataset.bin, img.dataset.mime).then((url) => {
+      img.src = url;
+    }, () => {
+      delete img.dataset.geladen;
+    });
+  }
+
+  function vorschauenBeobachten() {
+    const bilder = document.querySelectorAll('img[data-bin]');
+    const beobachter = 'IntersectionObserver' in window
+      ? new IntersectionObserver((eintraege) => {
+        for (const eintrag of eintraege) {
+          if (!eintrag.isIntersecting) continue;
+          beobachter.unobserve(eintrag.target);
+          bildLaden(eintrag.target);
+        }
+      }, { rootMargin: '400px 0px' })
+      : null;
+    bilder.forEach((img) => {
+      const w = img.getAttribute('width');
+      const h = img.getAttribute('height');
+      if (w && h) img.style.aspectRatio = w + ' / ' + h;
+      if (beobachter) beobachter.observe(img); else bildLaden(img);
+    });
+  }
+
+  function klick(ereignis) {
+    if (ereignis.defaultPrevented || ereignis.button !== 0) return;
+    const ziel = ereignis.target instanceof Element ? ereignis.target : null;
+    if (!ziel) return;
+    const download = ziel.closest('a[data-download]');
+    if (download) {
+      ereignis.preventDefault();
+      herunterladen(download);
+      return;
+    }
+    const vorschau = ziel.closest('.vorschau-bild');
+    if (vorschau) {
+      ereignis.preventDefault();
+      grossansicht(vorschau);
+    }
+  }
+
+  // ---------- Downloads ----------
+
+  function speichern(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+  }
+
+  async function herunterladen(a) {
+    if (a.getAttribute('aria-busy') === 'true') return;
+    const vorher = a.innerHTML;
+    a.setAttribute('aria-busy', 'true');
+    a.textContent = 'Wird geladen …';
+    try {
+      const klar = await entschluesseln(await holen(a.dataset.download), schluessel);
+      speichern(new Blob([klar], { type: a.dataset.mime || 'application/octet-stream' }), a.dataset.name || 'Datei');
+      a.innerHTML = vorher;
+      a.removeAttribute('aria-busy');
+    } catch (fehler) {
+      a.textContent = 'Laden fehlgeschlagen. Bitte erneut versuchen.';
+      setTimeout(() => {
+        a.innerHTML = vorher;
+        a.removeAttribute('aria-busy');
+      }, 3500);
+    }
+  }
+
+  // ---------- Großansicht ----------
+
+  function grossansicht(geklickt) {
+    const nr = geklickt.dataset.anlage;
+    const knoepfe = Array.from(document.querySelectorAll('.vorschau-bild'))
+      .filter((k) => k.dataset.anlage === nr);
+    const start = Math.max(0, knoepfe.indexOf(geklickt));
+    const anlage = document.getElementById('anlage-' + nr);
+    const titel = 'Anlage ' + nr + (anlage && anlage.dataset.titel ? ': ' + anlage.dataset.titel : '');
+
+    const hinter = document.createElement('div');
+    hinter.className = 'lb-hinter';
+    hinter.setAttribute('role', 'dialog');
+    hinter.setAttribute('aria-modal', 'true');
+    hinter.setAttribute('aria-label', titel);
+
+    const kopf = document.createElement('div');
+    kopf.className = 'lb-kopf';
+    const ueberschrift = document.createElement('p');
+    ueberschrift.className = 'lb-titel';
+    ueberschrift.textContent = titel;
+    const zu = document.createElement('button');
+    zu.type = 'button';
+    zu.className = 'lb-zu';
+    zu.setAttribute('aria-label', 'Schließen');
+    zu.textContent = '×';
+    kopf.append(ueberschrift, zu);
+
+    const liste = document.createElement('div');
+    liste.className = 'lb-liste';
+    const eintraege = knoepfe.map((k) => {
+      const quelle = k.querySelector('img[data-bin]');
+      const img = document.createElement('img');
+      img.className = 'lb-bild';
+      img.alt = quelle.alt;
+      img.width = Number(quelle.getAttribute('width')) || 800;
+      img.height = Number(quelle.getAttribute('height')) || 1000;
+      img.style.aspectRatio = img.width + ' / ' + img.height;
+      img.decoding = 'async';
+      liste.appendChild(img);
+      return { img, id: quelle.dataset.bin, mime: quelle.dataset.mime };
+    });
+
+    hinter.append(kopf, liste);
+    document.body.appendChild(hinter);
+    document.documentElement.classList.add('lb-offen');
+    // Zum angeklickten Bild springen; nach dessen Laden noch einmal, solange niemand selbst gescrollt hat.
+    let selbstGescrollt = false;
+    ['wheel', 'touchstart', 'keydown', 'pointerdown'].forEach((art) => liste.addEventListener(art, () => { selbstGescrollt = true; }, { passive: true }));
+    const springen = () => {
+      if (!selbstGescrollt && eintraege[start]) liste.scrollTop = eintraege[start].img.offsetTop - 4;
+    };
+    springen();
+    if (eintraege[start]) eintraege[start].img.addEventListener('load', springen, { once: true });
+
+    const reihenfolge = eintraege.slice(start).concat(eintraege.slice(0, start));
+    (async () => {
+      for (const e of reihenfolge) {
+        if (!hinter.isConnected) return;
+        try { e.img.src = await bildUrl(e.id, e.mime); } catch (f) { /* bleibt leer */ }
+      }
+    })();
+
+    function schliessen() {
+      document.removeEventListener('keydown', taste, true);
+      hinter.remove();
+      document.documentElement.classList.remove('lb-offen');
+      geklickt.focus({ preventScroll: true });
+    }
+    function taste(ereignis) {
+      if (ereignis.key === 'Escape' || ereignis.key === 'Esc') {
+        ereignis.preventDefault();
+        schliessen();
+      } else if (ereignis.key === 'Tab') {
+        ereignis.preventDefault();
+        zu.focus();
+      }
+    }
+    zu.addEventListener('click', schliessen);
+    hinter.addEventListener('click', (ereignis) => {
+      if (ereignis.target === hinter || ereignis.target === liste || ereignis.target === kopf) schliessen();
+    });
+    document.addEventListener('keydown', taste, true);
+    zu.focus({ preventScroll: true });
+  }
+})();
+</script>
+</body>
+</html>
